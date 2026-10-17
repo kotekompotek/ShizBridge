@@ -28,3 +28,4 @@ Thumbs.db
 *.jks
 *.keystore
 .env
+android/.kotlin/
