@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.ShizBridge" parent="Theme.Material3.DayNight">
+        <item name="colorPrimary">@color/bridge_primary</item>
+        <item name="colorSecondary">@color/bridge_accent</item>
+        <item name="android:statusBarColor">@color/bridge_primary_dark</item>
+    </style>
+</resources>

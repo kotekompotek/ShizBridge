@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">ShizBridge</string>
+
+    <string name="status_stopped">Server stopped</string>
+    <string name="status_running">Server running</string>
+    <string name="section_pairing">Pairing</string>
+    <string name="code_hint">One-time code for shizbridge pair — valid 5 minutes</string>
+    <string name="btn_regen">New code</string>
+    <string name="btn_copy">Copy</string>
+    <string name="btn_start">Start server</string>
+    <string name="btn_stop">Stop server</string>
+    <string name="section_adbd">ADB port on this phone</string>
+    <string name="adbd_hint">Wireless debugging must be enabled in Android settings.</string>
+    <string name="btn_detect">Detect</string>
+    <string name="section_devices">Paired computers</string>
+    <string name="devices_empty">No paired computers yet</string>
+    <string name="btn_revoke">Revoke</string>
+    <string name="btn_revoke_all">Revoke all</string>
+    <string name="section_log">Log</string>
+    <string name="notification_title">ShizBridge is running</string>
+    <string name="notification_text">Waiting for the paired computer</string>
+    <string name="notif_channel">ShizBridge service</string>
+    <string name="permission_rationale">Notifications are used only for the persistent service indicator.</string>
+    <string name="toast_copied">Code copied</string>
+    <string name="toast_detected">Detected adbd port %1$d</string>
+    <string name="toast_notfound">adbd not found — enable Wireless debugging</string>
+    <string name="toast_port_saved">ADB port saved: %1$d</string>
+    <string name="code_expired">expired — tap New code</string>
+    <string name="revoke_all_confirm">All paired computers will lose access. Re-pair to restore it.</string>
+</resources>

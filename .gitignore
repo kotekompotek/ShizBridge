@@ -1,0 +1,30 @@
+# Go
+agent/shizbridge
+agent/shizbridge.exe
+dist/
+*.test
+*.out
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.idea/
+android/*.iml
+android/.cxx/
+*.apk
+*.aab
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit)
+*.jks
+*.keystore
+.env

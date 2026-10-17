@@ -1,0 +1,7 @@
+<resources>
+    <color name="bridge_primary">#2962FF</color>
+    <color name="bridge_primary_dark">#0039CB</color>
+    <color name="bridge_accent">#00C853</color>
+    <color name="bridge_log_bg">#101418</color>
+    <color name="bridge_log_fg">#9CE89C</color>
+</resources>
