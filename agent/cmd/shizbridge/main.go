@@ -187,6 +187,10 @@ func cmdUp(args []string) error {
 		Identity:   id,
 		Pin:        cfg.ServerPin,
 		Logf:       logf,
+		// TLS-alive-but-silent-ADB = phone app / Shizuku UserService dead.
+		// Without a breaker, adb's auto-reconnect hammers ~1 conn/s forever.
+		PauseAfterSilent: 5,
+		PauseFor:         2 * time.Minute,
 	})
 	if serveErr != nil {
 		return serveErr

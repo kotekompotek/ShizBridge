@@ -15,7 +15,7 @@ object Proto {
     const val HKDF_INFO = "ShizBridge pairing v1"
     const val PROOF_LABEL = "ShizBridge code proof"
     const val APP_NAME = "ShizBridge"
-    const val APP_VERSION = "0.1.0"
+    const val APP_VERSION = "0.3.0"
 
     val gson: Gson = Gson()
 

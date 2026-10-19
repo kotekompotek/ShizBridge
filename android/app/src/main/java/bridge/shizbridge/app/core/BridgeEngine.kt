@@ -4,14 +4,12 @@ import android.content.Context
 import java.io.EOFException
 import java.io.InputStream
 import java.io.PushbackInputStream
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.KeyFactory
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLContext
@@ -38,6 +36,7 @@ class BridgeEngine(context: Context) {
 
     data class PairCode(val code: String, val expiresAt: Long)
 
+    private val appContext = context.applicationContext
     val prefs = Prefs(context)
 
     @Volatile
@@ -47,9 +46,6 @@ class BridgeEngine(context: Context) {
     @Volatile
     var currentCode: PairCode? = null
         private set
-
-    @Volatile
-    private var cachedAdbdPort = 0
 
     var serverIdentity: ServerIdentity? = null
         private set
@@ -158,44 +154,18 @@ class BridgeEngine(context: Context) {
         emitAllow()
     }
 
-    fun detectAdbd(): Int {
-        val port = AdbdDetector.detect(prefs.listenPort)
-        cachedAdbdPort = port
-        return port
-    }
-
-    fun adbdPort(): Int = when {
-        prefs.adbdPort > 0 -> prefs.adbdPort
-        cachedAdbdPort > 0 -> cachedAdbdPort
-        else -> detectAdbd()
-    }
-
-    fun setAdbdPort(port: Int) {
-        prefs.adbdPort = port
-        cachedAdbdPort = port
-    }
-
     fun allowlist(): Map<String, AllowEntry> = prefs.allowlist()
 
-    fun info(): CtlInfoResp {
-        val port = adbdPort()
-        return CtlInfoResp(
-            op = "info",
-            app = Proto.APP_NAME,
-            proto = Proto.VERSION,
-            ver = Proto.APP_VERSION,
-            adbdPort = port,
-            adbdUp = port > 0 && adbdReachable(port),
-            clients = activeRelays.get(),
-            shizuku = "unsupported",
-        )
-    }
-
-    private fun adbdReachable(port: Int): Boolean = try {
-        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 250) ; true }
-    } catch (_: Exception) {
-        false
-    }
+    fun info(): CtlInfoResp = CtlInfoResp(
+        op = "info",
+        app = Proto.APP_NAME,
+        proto = Proto.VERSION,
+        ver = Proto.APP_VERSION,
+        adbdPort = 0,
+        adbdUp = false,
+        clients = activeRelays.get(),
+        shizuku = ShizukuBridge.protocolState(appContext),
+    )
 
     // ---- identity ----
 
@@ -235,11 +205,18 @@ class BridgeEngine(context: Context) {
     private fun handleConnection(raw: Socket) {
         var ssl: SSLSocket? = null
         try {
-            raw.soTimeout = 15_000
-            ssl = sslContext!!.socketFactory
-                .createSocket(raw, raw.inetAddress.hostAddress, raw.port, true) as SSLSocket
-            ssl.enabledProtocols = protocolsOf(ssl)
-            ssl.startHandshake()
+            // SSLServerSocket.accept() already returns a fully configured
+            // SSLSocket (inherits needClientAuth/enabledProtocols). Wrapping it
+            // again via createSocket() would stack a second nested TLS layer:
+            // the client handshakes with the inner one, the outer one then
+            // chokes on decrypted app bytes ("Unable to parse TLS packet").
+            val tls = raw as? SSLSocket
+                ?: sslContext!!.socketFactory
+                    .createSocket(raw, raw.inetAddress.hostAddress, raw.port, true) as SSLSocket
+            ssl = tls
+            tls.soTimeout = 15_000
+            tls.enabledProtocols = protocolsOf(tls)
+            tls.startHandshake()
             val peerChain = trustCapture.clientChain.get()
             trustCapture.clientChain.remove()
             val inp = PushbackInputStream(ssl.inputStream, 8)
@@ -263,7 +240,7 @@ class BridgeEngine(context: Context) {
                         log("relay rejected: unknown client cert")
                         return
                     }
-                    handleRelay(ssl, inp)
+                    handleAdb(ssl, inp)
                 }
             }
         } catch (e: SSLException) {
@@ -414,64 +391,32 @@ class BridgeEngine(context: Context) {
         }
     }
 
-    // ---- relay ----
+    // ---- adb device session (in-app mini-adbd) ----
 
-    private fun handleRelay(ssl: SSLSocket, inp: InputStream) {
-        val port = adbdPort()
-        if (port <= 0) {
-            log("adbd port not found — enable Wireless debugging in Android settings")
+    private fun handleAdb(ssl: SSLSocket, inp: InputStream) {
+        if (ShizukuBridge.state(appContext) != ShizukuBridge.State.RUNNING) {
+            log("adb session rejected: Shizuku is not running")
             return
         }
-        val adbd = try {
-            Socket().apply { connect(InetSocketAddress("127.0.0.1", port), 1200) }
-        } catch (e: Exception) {
-            log("adbd :$port unreachable (${e.message})")
+        val svc = ShizukuBridge.ensureService(appContext, onLog = ::log)
+        if (svc == null) {
+            log("adb session rejected: Shizuku UserService unavailable")
             return
         }
+        ssl.soTimeout = 0 // interactive shells may sit idle for hours
         activeRelays.incrementAndGet()
         emitStats()
-        log("relay open → 127.0.0.1:$port (${activeRelays.get()} active)")
-        val closed = CountDownLatch(2)
+        log("adb session opened (${activeRelays.get()} active)")
         try {
-            pool.execute { // PC → adbd
-                try {
-                    copy(inp, adbd.getOutputStream())
-                    try { adbd.shutdownOutput() } catch (_: Exception) {}
-                } finally {
-                    closed.countDown()
-                }
-            }
-            pool.execute { // adbd → PC
-                try {
-                    copy(adbd.getInputStream(), ssl.outputStream)
-                } finally {
-                    closed.countDown()
-                }
-            }
-            closed.await()
-        } catch (_: InterruptedException) {
+            AdbDeviceSession(ssl, inp, svc, ::log).run()
+        } catch (e: EOFException) {
+            // client closed the connection — normal end of session
+        } catch (e: Exception) {
+            log("adb session error: ${e.message}")
         } finally {
             activeRelays.decrementAndGet()
             emitStats()
-            try { adbd.close() } catch (_: Exception) {}
-            try { ssl.close() } catch (_: Exception) {}
-            log("relay closed (${activeRelays.get()} active)")
-        }
-    }
-
-    private fun copy(src: InputStream, dst: java.io.OutputStream) {
-        val buf = ByteArray(16384)
-        try {
-            while (true) {
-                val n = src.read(buf)
-                if (n < 0) return
-                if (n > 0) {
-                    dst.write(buf, 0, n)
-                    dst.flush()
-                }
-            }
-        } catch (_: Exception) {
-            // connection torn down — expected on close
+            log("adb session closed (${activeRelays.get()} active)")
         }
     }
 

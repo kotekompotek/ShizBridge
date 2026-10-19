@@ -15,7 +15,6 @@ class Prefs(context: Context) {
     companion object {
         private const val K_CERT = "server_cert_der"
         private const val K_KEY = "server_key_pkcs8"
-        private const val K_ADBD = "adbd_port"
         private const val K_PORT = "listen_port"
         private const val K_ALLOW = "allowlist"
         private const val K_ATTEMPTS = "pair_attempts"
@@ -33,10 +32,6 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putString(K_KEY, value?.let { Crypto.b64(it) }).apply()
 
     // ---- ports ----
-
-    var adbdPort: Int
-        get() = sp.getInt(K_ADBD, 0)
-        set(value) = sp.edit().putInt(K_ADBD, value).apply()
 
     val listenPort: Int
         get() = sp.getInt(K_PORT, Proto.DEFAULT_PORT)

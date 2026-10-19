@@ -12,7 +12,7 @@ the session type (first 4 bytes):
 |---|---|
 | `SBPR` | **Pairing handshake** (framed JSON, then encrypted) |
 | `SBCT` (+`L`, total `SBCTL`) | **Control channel** (framed JSON) |
-| anything else | **Relay** — raw ADB bytes, transparently piped to adbd |
+| anything else | **ADB device session** — in-app mini-adbd executed via Shizuku |
 
 > Design note: TLS-first removes the need to peek the plaintext stream on
 > Android (JSSE cannot push back a consumed byte into an `SSLSocket`).
@@ -119,15 +119,16 @@ Notes:
    authenticated by the code proof instead).
 3. Client: verifies the server cert's SPKI-SHA256 equals the pin
    captured at pairing (during pairing itself: no pin yet, see above).
-4. After the handshake the channel is a **transparent byte pipe**:
+4. After the handshake the channel is one of:
 
-   * **Relay mode** (default): both directions are copied verbatim between
-     the TLS socket and `127.0.0.1:<adbd_port>` on the phone. The first
-     4 bytes that are neither `SBPR` nor `SBCT` are pushed back and flow
-     to adbd untouched (ADB CNXN/AUTH/OPEN/WRTE…, sync, scrcpy).
+   * **ADB device session** (default): the phone terminates the ADB wire
+     protocol itself (an in-app mini-adbd) and executes every request
+     through a Shizuku `UserService` running as shell (uid 2000). The
+     first 4 bytes that are neither `SBPR` nor `SBCT` are pushed back
+     and flow to the ADB codec untouched (CNXN/OPEN/WRTE…, sync).
    * **Control mode**: if the first 5 bytes received from the client are
      ASCII `SBCTL`, the connection is a JSON control channel instead
-     (never mixed with relay on one connection).
+     (never mixed with an ADB session on one connection).
 
 ### Control channel
 
@@ -138,18 +139,38 @@ C → S   {"op":"ping"}
 S → C   {"op":"pong","ts":<unix ms>}
 
 C → S   {"op":"info"}
-S → C   {"op":"info","app":"ShizBridge","proto":1,"ver":"0.1.0",
-         "adbd_port":5555,"adbd_up":true,"clients":1,
+S → C   {"op":"info","app":"ShizBridge","proto":1,"ver":"0.3.0",
+         "adbd_port":0,"adbd_up":false,"clients":1,
          "shizuku":"running|stopped|unsupported"}
 ```
 
-## 4. ADB port on the phone
+`adbd_port`/`adbd_up` are **deprecated** (always `0`/`false` since the
+phone no longer talks to adbd); they are kept for wire compatibility
+and may disappear in a future protocol version. `shizuku` reflects
+whether Shizuku is installed and its service is running — the ADB
+session requires `running`.
 
-MVP: auto-detect by parsing `/proc/self/net/tcp{,6}` for loopback
-LISTEN sockets and probing candidates with a real ADB `CNXN` exchange;
-manual override in the app UI.
-Phase 2: Shizuku-based discovery (`mdns services` / wireless-debugging
-state) and `adb tcpip` control.
+## 4. ADB device session (in-app mini-adbd)
+
+The phone answers the ADB handshake itself; no adbd TCP port, no
+Wireless debugging, no port scanning:
+
+* Handshake: client `CNXN` → phone replies `CNXN`
+  (version `0x01000001`, maxdata 256 KiB, banner `device:shizbridge:`
+  **without a `features` key**). No `AUTH` is ever sent — TLS client
+  cert + allowlist already authenticate the peer, and omitting features
+  keeps clients on the legacy protocol.
+* Flow control: standard ADB credit model (each side starts with one
+  credit, `OKAY`/`CLSE` never consume, received `OKAY` grants one). An
+  incoming `WRTE` is `OKAY`ed only after its payload was consumed.
+* Services served via Shizuku (shell uid): `shell:` / `shell` (sh, no
+  PTY, stderr merged), `exec:` / `exec-out:` (argv split on commas),
+  `sync:` (STAT/LIST/RECV/SEND/DATA/DONE/FAIL), `reboot:`.
+* Everything else (`tcp:`, `udp:`, `localabstract:`, `root:`, `usb:`,
+  `shell_v2`, …) is refused with `CLSE`. In particular **scrcpy and
+  `adb forward` do not work** — there is no socket forwarding.
+* Exit codes are not reported (legacy shell has no channel for them;
+  `shell_v2` is not advertised).
 
 ## 5. Test vectors (both implementations MUST assert these)
 

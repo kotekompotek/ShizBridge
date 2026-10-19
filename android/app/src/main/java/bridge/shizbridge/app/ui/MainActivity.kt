@@ -11,7 +11,6 @@ import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.inputmethod.EditorInfo
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,9 +23,10 @@ import bridge.shizbridge.app.R
 import bridge.shizbridge.app.core.AllowEntry
 import bridge.shizbridge.app.core.BridgeEngine
 import bridge.shizbridge.app.core.BridgeHolder
+import bridge.shizbridge.app.core.ShizukuBridge
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.textfield.TextInputEditText
 import java.net.NetworkInterface
+import rikka.shizuku.Shizuku
 
 class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
 
@@ -38,9 +38,8 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
     private lateinit var codeExpiry: TextView
     private lateinit var btnRegen: MaterialButton
     private lateinit var btnCopy: MaterialButton
-    private lateinit var portInput: TextInputEditText
-    private lateinit var portHint: TextView
-    private lateinit var btnDetect: MaterialButton
+    private lateinit var shizukuStatus: TextView
+    private lateinit var btnConnectShizuku: MaterialButton
     private lateinit var btnRevokeAll: MaterialButton
     private lateinit var devicesEmpty: TextView
     private lateinit var deviceList: RecyclerView
@@ -49,6 +48,36 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val logBuffer = ArrayDeque<String>()
     private lateinit var deviceAdapter: DeviceAdapter
+
+    private var shizukuConnectPending = false
+
+    private companion object {
+        /** One auto permission prompt per process; the button can still retry. */
+        var permissionAutoRequested = false
+    }
+
+    private val shizukuBinderListener = Shizuku.OnBinderReceivedListener {
+        if (shizukuConnectPending) {
+            shizukuConnectPending = false
+            mainHandler.post { onShizukuReady() }
+        } else {
+            mainHandler.post { refreshShizuku() }
+        }
+    }
+
+    private val shizukuPermissionListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, _ ->
+            if (requestCode == ShizukuBridge.PERMISSION_REQUEST_CODE) {
+                mainHandler.post {
+                    if (ShizukuBridge.state(this) == ShizukuBridge.State.RUNNING) {
+                        bindUserService() // granted — connect without any further taps
+                    } else {
+                        Toast.makeText(this, R.string.toast_shizuku_denied, Toast.LENGTH_LONG).show()
+                        refreshShizuku()
+                    }
+                }
+            }
+        }
 
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -69,9 +98,8 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
         codeExpiry = findViewById(R.id.codeExpiry)
         btnRegen = findViewById(R.id.btnRegen)
         btnCopy = findViewById(R.id.btnCopy)
-        portInput = findViewById(R.id.portInput)
-        portHint = findViewById(R.id.portHint)
-        btnDetect = findViewById(R.id.btnDetect)
+        shizukuStatus = findViewById(R.id.shizukuStatus)
+        btnConnectShizuku = findViewById(R.id.btnConnectShizuku)
         btnRevokeAll = findViewById(R.id.btnRevokeAll)
         devicesEmpty = findViewById(R.id.devicesEmpty)
         deviceList = findViewById(R.id.deviceList)
@@ -90,21 +118,20 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
         }
         btnRegen.setOnClickListener { engine.newCode() }
         btnCopy.setOnClickListener { copyCode() }
-        btnDetect.setOnClickListener { detectPort() }
+        btnConnectShizuku.setOnClickListener { connectShizuku() }
         btnRevokeAll.setOnClickListener { confirmRevokeAll() }
 
-        portInput.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) savePort() }
-        portInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_DONE) {
-                savePort()
-                portInput.clearFocus()
-                true
-            } else {
-                false
-            }
-        }
-
         refreshAll()
+
+        Shizuku.addBinderReceivedListenerSticky(shizukuBinderListener)
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        autoConnectShizuku()
+    }
+
+    override fun onDestroy() {
+        Shizuku.removeBinderReceivedListener(shizukuBinderListener)
+        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
+        super.onDestroy()
     }
 
     override fun onStart() {
@@ -148,7 +175,18 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
         refreshCode()
         refreshCodeExpiry()
         refreshDevices()
-        portInput.setText(if (engine.prefs.adbdPort > 0) engine.prefs.adbdPort.toString() else "")
+        refreshShizuku()
+    }
+
+    private fun refreshShizuku() {
+        shizukuStatus.setText(
+            when (ShizukuBridge.state(this)) {
+                ShizukuBridge.State.NOT_INSTALLED -> R.string.shizuku_status_not_installed
+                ShizukuBridge.State.NOT_RUNNING -> R.string.shizuku_status_stopped
+                ShizukuBridge.State.PERMISSION_REQUIRED -> R.string.shizuku_status_permission
+                ShizukuBridge.State.RUNNING -> R.string.shizuku_status_ready
+            },
+        )
     }
 
     private fun refreshStatus() {
@@ -225,31 +263,79 @@ class MainActivity : AppCompatActivity(), BridgeEngine.Listener {
         Toast.makeText(this, R.string.toast_copied, Toast.LENGTH_SHORT).show()
     }
 
-    private fun detectPort() {
-        btnDetect.isEnabled = false
-        Thread {
-            val port = engine.detectAdbd()
-            runOnUiThread {
-                btnDetect.isEnabled = true
-                if (port > 0) {
-                    portInput.setText(port.toString())
-                    Toast.makeText(this, getString(R.string.toast_detected, port), Toast.LENGTH_SHORT).show()
-                    portHint.text = getString(R.string.toast_detected, port)
+    private fun connectShizuku() {
+        when (ShizukuBridge.state(this)) {
+            ShizukuBridge.State.NOT_INSTALLED -> {
+                Toast.makeText(this, R.string.toast_shizuku_not_installed, Toast.LENGTH_LONG).show()
+                refreshShizuku()
+            }
+            ShizukuBridge.State.NOT_RUNNING -> {
+                shizukuConnectPending = true
+                if (ShizukuBridge.openShizukuApp(this)) {
+                    Toast.makeText(this, R.string.toast_shizuku_opening, Toast.LENGTH_LONG).show()
+                    shizukuStatus.setText(R.string.shizuku_status_stopped)
                 } else {
-                    Toast.makeText(this, R.string.toast_notfound, Toast.LENGTH_LONG).show()
-                    portHint.setText(R.string.adbd_hint)
+                    shizukuConnectPending = false
+                    Toast.makeText(this, R.string.toast_shizuku_not_installed, Toast.LENGTH_LONG).show()
+                }
+            }
+            ShizukuBridge.State.PERMISSION_REQUIRED -> ShizukuBridge.requestPermission()
+            ShizukuBridge.State.RUNNING -> bindUserService()
+        }
+    }
+
+    private fun onShizukuReady() {
+        when (ShizukuBridge.state(this)) {
+            ShizukuBridge.State.PERMISSION_REQUIRED -> ShizukuBridge.requestPermission()
+            ShizukuBridge.State.RUNNING -> bindUserService()
+            else -> refreshShizuku()
+        }
+    }
+
+    /** Walks the whole Shizuku flow with no user taps: launch → permission → bind. */
+    private fun autoConnectShizuku() {
+        when (ShizukuBridge.state(this)) {
+            ShizukuBridge.State.NOT_INSTALLED -> refreshShizuku()
+            ShizukuBridge.State.NOT_RUNNING -> {
+                if (!shizukuConnectPending) {
+                    shizukuConnectPending = true
+                    if (ShizukuBridge.openShizukuApp(this)) {
+                        Toast.makeText(this, R.string.toast_shizuku_opening, Toast.LENGTH_LONG).show()
+                        shizukuStatus.setText(R.string.shizuku_status_stopped)
+                    } else {
+                        shizukuConnectPending = false
+                        refreshShizuku()
+                    }
+                }
+            }
+            ShizukuBridge.State.PERMISSION_REQUIRED -> {
+                if (!permissionAutoRequested) {
+                    permissionAutoRequested = true
+                    ShizukuBridge.requestPermission()
+                } else {
+                    refreshShizuku()
+                }
+            }
+            ShizukuBridge.State.RUNNING -> bindUserService()
+        }
+    }
+
+    private fun bindUserService() {
+        if (shizukuConnectPending) return
+        shizukuConnectPending = true
+        shizukuStatus.setText(R.string.shizuku_status_binding)
+        Thread {
+            val svc = ShizukuBridge.ensureService(applicationContext)
+            mainHandler.post {
+                shizukuConnectPending = false
+                if (svc != null) {
+                    shizukuStatus.setText(R.string.shizuku_status_bound)
+                } else {
+                    Toast.makeText(this, R.string.toast_shizuku_bind_failed, Toast.LENGTH_LONG).show()
+                    refreshShizuku()
                 }
             }
         }.start()
-    }
-
-    private fun savePort() {
-        val p = portInput.text?.toString()?.trim()?.toIntOrNull() ?: return
-        if (p in 1..65535) {
-            engine.setAdbdPort(p)
-            Toast.makeText(this, getString(R.string.toast_port_saved, p), Toast.LENGTH_SHORT).show()
-            portHint.text = getString(R.string.toast_port_saved, p)
-        }
     }
 
     private fun confirmRevokeAll() {

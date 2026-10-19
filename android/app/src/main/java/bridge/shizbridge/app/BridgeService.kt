@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import bridge.shizbridge.app.core.BridgeHolder
+import bridge.shizbridge.app.core.ShizukuBridge
 
 /**
  * Keeps the bridge alive while the app is backgrounded. The actual work
@@ -47,6 +48,14 @@ class BridgeService : Service() {
         }
         startForegroundWithNotification()
         BridgeHolder.get(this).start()
+        // Warm up the Shizuku UserService in the background so the first
+        // incoming ADB session doesn't pay the bind latency (or its failure).
+        Thread {
+            val svc = ShizukuBridge.ensureService(applicationContext)
+            if (svc == null && ShizukuBridge.state(applicationContext) == ShizukuBridge.State.RUNNING) {
+                android.util.Log.w("ShizBridge", "warm-up: UserService bind failed")
+            }
+        }.start()
         return START_STICKY
     }
 
